@@ -643,7 +643,8 @@ struct PlayerPage: View {
                 }
             }
             if !cleanScreen && isActive && !touchpadEngaged && (!danmaku.isEmpty || dmStress) {
-                DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
+                // 页面忽略顶部安全区时 topInset 是 0：至少让过状态栏，弹幕从顶栏下面开始飘，不压「直播 / 关注 / 推荐」
+                DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: max(topInset, DYDuoMetrics.windowSafeTop))
             }
             // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
             if player != nil || vlc != nil { gestures }
@@ -686,7 +687,7 @@ struct PlayerPage: View {
                 .allowsHitTesting(false)
         }
         .overlay(alignment: .bottom) {
-            if isActive && !cleanScreen && !progressOnRail {
+            if isActive && !cleanScreen && !progressOnRail && showsProgressBar {
                 DDClockReader(clock: clock) { cur in
                 progressBar(cur)
                     .accessibilityElement(children: .ignore)
@@ -1133,20 +1134,33 @@ struct PlayerPage: View {
         .dyPlaybackHintStyle()
     }
 
+    /// 官方抖音同款：30 秒以内的短视频不显示进度条，只在左右滑快进时出现；离线库里的视频一律显示
+    static let progressMinDuration: Double = 30
+
+    private var showsProgressBar: Bool {
+        seeking || offlineContext?.inLibrary == true || duration >= Self.progressMinDuration
+    }
+
     private func progressBar(_ cur: Double) -> some View {
         let pos = seeking ? seekPreview : cur
         let frac = duration > 0 ? max(0, min(1, pos / duration)) : 0
-        // 不显示时间（拖动时预览气泡里有），只留细进度条
+        // 播放中：一条淡细线，不抢画面；暂停：加粗、出圆点，方便拖；拖动：全亮（时间在预览气泡里）
+        let paused = userPaused && !seeking
+        let height: CGFloat = seeking ? 6 : (paused ? 4 : 2)
+        let knob: CGFloat = seeking ? 15 : (paused ? 10 : 0)
+        let track: Double = seeking ? 0.3 : (paused ? 0.25 : 0.15)
+        let fill: Double = seeking ? 1 : (paused ? 0.9 : 0.45)
         return VStack(spacing: 0) {
             GeometryReader { g in
                 ZStack(alignment: .leading) {
-                    // 平时半透明不挡画面，只有进度条拖动时才变实
-                    Capsule().fill(.white.opacity(seeking ? 0.28 : 0.12)).frame(height: (seeking ? 6 : 2) * ui)
-                    Capsule().fill(.white.opacity(seeking ? 1 : 0.4)).frame(width: g.size.width * frac, height: (seeking ? 6 : 2) * ui)
-                    Circle().fill(.white.opacity(seeking ? 1 : 0.45)).frame(width: (seeking ? 15 : 6) * ui, height: (seeking ? 15 : 6) * ui)
-                        .offset(x: max(0, g.size.width * frac - (seeking ? 7.5 : 3) * ui))
+                    Capsule().fill(.white.opacity(track)).frame(height: height * ui)
+                    Capsule().fill(.white.opacity(fill)).frame(width: g.size.width * frac, height: height * ui)
+                    Circle().fill(.white).frame(width: knob * ui, height: knob * ui)
+                        .offset(x: max(0, g.size.width * frac - knob / 2 * ui))
+                        .opacity(knob > 0 ? 1 : 0)
                 }
                 .frame(maxHeight: .infinity)
+                .animation(.easeOut(duration: 0.18), value: height)
                 .onAppear { barWidth = g.size.width }
                 .onChange(of: g.size.width) { _, w in barWidth = w }
             }

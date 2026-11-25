@@ -2352,21 +2352,19 @@ struct DYUpstreamFeedScreen: DYRecommendFeedHost {
 
     }
 
-    /// 顶部一排：左菜单，中间 关注/推荐/直播，右边 搜索 / 我的
-    /// 顶栏：只留「关注 / 推荐 / 直播」三个纯文字页签，不用胶囊，与状态栏时间/信号同一行。
-    /// 自适应仅收紧间距；消息与头像入口始终保留最小触摸区。
+    /// 顶栏（官方抖音布局）：中间「直播 / 关注 / 推荐」页签始终居中，左上「我的」头像、右上「信息」，
+    /// 对应官方左上菜单、右上搜索的位置。Duo 上顶栏和状态栏同一行，两边按钮贴着页签，不压时间和电量。
+    /// 自适应仅收紧间距；两边入口始终保留 44pt 触摸区。
     private var topBar: some View {
         ViewThatFits(in: .horizontal) {
-            topBarRow(spacing: topNudge > 0 ? 5 : 14, hPad: 16)
-            topBarRow(spacing: 0, hPad: 10)
-            topBarRow(spacing: 0, hPad: 8)
-            topBarRow(spacing: 0, hPad: 5)
+            topBarRow(spacing: topNudge > 0 ? 14 : 22, hPad: 6)
+            topBarRow(spacing: 12, hPad: 4)
+            topBarRow(spacing: 4, hPad: 2)
         }
-        .themeShadow(.mediaLabel)
         .frame(maxWidth: .infinity, alignment: .center)
         // 整行可点区域随内容高度撑开，避免点在文字上方的极窄条带时落空
         .frame(minHeight: 54)
-        // 合屏避让：用右侧内缩把居中点推左（small move），绝不把左边的「关注」推出屏幕
+        // 合屏避让：用右侧内缩把居中点推左（small move），绝不把左边的入口推出屏幕
         .padding(.trailing, topNudge)
         // 外屏（compact）状态区更深：外屏时间约 85pt，内屏（regular）约 39pt
         // 注意用 size class 判断，不能用容器宽度——评论栏打开时视频区会变窄。
@@ -2374,80 +2372,59 @@ struct DYUpstreamFeedScreen: DYRecommendFeedHost {
     }
 
     private func topBarRow(spacing: CGFloat, hPad: CGFloat) -> some View {
-        // 触摸区左右各扩 hPad、上下各扩 14（图标与字号不动）
-        HStack(spacing: spacing) {
-            ForEach(DYTab.allCases, id: \.self) { t in
-                Button { tapChannel(t, switchTab: selectTab) } label: {
-                    VStack(spacing: 3) {
-                        Text(t.title)
-                            .font(.headline.weight(tab == t ? .bold : .medium))
-                            .foregroundStyle(theme.media.onMedia.color(for: scheme).opacity(tab == t ? 1 : 0.62))
-                            .lineLimit(1).fixedSize()
-                        Capsule()
-                            .fill(theme.media.onMedia.color(for: scheme))
-                            .frame(width: 16, height: 3)
-                            .opacity(tab == t ? 1 : 0)
-                    }
-                    // 文字本身小，撑开触摸区，避免点不中/误判成下拉
-                    .padding(.horizontal, hPad)
-                    .padding(.vertical, 14)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("douyin.channel.\(t == .follow ? "follow" : t == .recommend ? "recommend" : "live")")
-                .accessibilityValue(t == .recommend && refreshing ? "正在刷新" : tab == t ? "已选择" : "")
-            }
-            // 「信息」：带字的入口（老板 2026-11-19 要加回来），跟 tab 同款字体；未读红点独立显示
-            Button { showMessages = true } label: {
-                // 跟左边页签同一结构（文字 + 3pt 下划线位，这里不显示）：页签文字被下划线顶高了 3pt，
-                // 「信息」只有文字就会比「直播」低一截（老板 2026-11-21 截图）
-                VStack(spacing: 3) {
-                    Text("信息")
-                        .font(.headline.weight(.medium))
-                        .foregroundStyle(theme.media.onMedia.color(for: scheme).opacity(0.62))
-                        .lineLimit(1).fixedSize()
-                    Capsule().frame(width: 16, height: 3).opacity(0)
-                }
-                .padding(.horizontal, hPad)
-                .padding(.vertical, 14)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-                .overlay(alignment: .topTrailing) {
-                    if noticeUnread > 0 {
-                        Circle().fill(theme.status.danger.color(for: scheme))
-                            .frame(width: 7, height: 7)
-                            .offset(x: -(hPad - 2), y: 10)
-                            .allowsHitTesting(false)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("信息")
-            .accessibilityIdentifier("douyin.messages.top")
-
+        let spread = !DYDuoMetrics.isDuoHardware
+        let fg = theme.media.onMedia.color(for: scheme)
+        return HStack(spacing: 0) {
             // 「我的」：独立按钮（不属于 tab 切换）
             Button { showMine = true } label: {
-                HStack(spacing: 5) {
-                    CachedAsyncImage(url: myUser?.avatar.flatMap(URL.init(string:))) { img in
-                        img.resizable().scaledToFill()
-                    } placeholder: {
-                        Image(systemName: "person.crop.circle")
-                            .font(.system(size: 19))
-                            .foregroundStyle(theme.media.onMedia.color(for: scheme).opacity(0.62))
-                    }
-                    .frame(width: 22, height: 22)
-                    .clipShape(Circle())
+                CachedAsyncImage(url: myUser?.avatar.flatMap(URL.init(string:))) { img in
+                    img.resizable().scaledToFill()
+                } placeholder: {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 24))
+                        .foregroundStyle(fg.opacity(0.85))
                 }
-                .padding(.horizontal, max(hPad - 2, 4))
-                .padding(.vertical, 12)
+                .frame(width: 28, height: 28)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(fg.opacity(0.85), lineWidth: 1))
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("我的")
             .accessibilityIdentifier("douyin.mine.top")
+
+            if spread { Spacer(minLength: 4) } else { Spacer().frame(width: 8) }
+
+            DYChannelTabs(selected: tab, refreshing: refreshing, spacing: spacing, hPad: hPad, foreground: fg) {
+                tapChannel($0, switchTab: selectTab)
+            }
+
+            if spread { Spacer(minLength: 4) } else { Spacer().frame(width: 8) }
+
+            // 「信息」：图标入口，未读红点挂在右上角
+            Button { showMessages = true } label: {
+                Image(systemName: "message")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(fg)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .topTrailing) {
+                        if noticeUnread > 0 {
+                            Circle().fill(theme.status.danger.color(for: scheme))
+                                .frame(width: 8, height: 8)
+                                .offset(x: -8, y: 9)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("信息")
+            .accessibilityIdentifier("douyin.messages.top")
         }
-        .fixedSize()
+        .padding(.horizontal, spread ? 8 : 0)
+        .themeShadow(.mediaLabel)
+        .fixedSize(horizontal: !spread, vertical: false)
     }
 
     /// The selector and current video actions share the same outer-column geometry.
@@ -2874,6 +2851,57 @@ enum DYTab: CaseIterable { case follow, recommend, live
         case .recommend: "推荐"
         case .live: "直播"
         }
+    }
+
+    /// 顶栏页签顺序，跟官方一样「推荐」在最右
+    static let barOrder: [DYTab] = [.live, .follow, .recommend]
+
+    var accessibilityID: String {
+        "douyin.channel.\(self == .follow ? "follow" : self == .recommend ? "recommend" : "live")"
+    }
+}
+
+/// 顶部频道页签（默认 / 经典共用）：官方抖音样式——同一字号，选中的加粗全白、其余 70% 白，
+/// 选中下方一根白色短条，切换时滑过去。
+struct DYChannelTabs: View {
+    let selected: DYTab
+    var refreshing = false
+    var spacing: CGFloat = 22
+    /// 每个页签左右再扩的触摸区（字号不变）
+    var hPad: CGFloat = 0
+    var foreground: Color = .white
+    let onTap: (DYTab) -> Void
+    @Namespace private var indicator
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            ForEach(DYTab.barOrder, id: \.self) { t in
+                Button { onTap(t) } label: {
+                    Text(t.title)
+                        .font(.headline.weight(selected == t ? .bold : .medium))
+                        .foregroundStyle(foreground.opacity(selected == t ? 1 : 0.7))
+                        .lineLimit(1).fixedSize()
+                        .padding(.bottom, 9)
+                        .overlay(alignment: .bottom) {
+                            if selected == t {
+                                Capsule().fill(foreground)
+                                    .frame(width: 20, height: 2.5)
+                                    .matchedGeometryEffect(id: "indicator", in: indicator)
+                            }
+                        }
+                        .padding(.horizontal, hPad)
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(t.accessibilityID)
+                .accessibilityValue(t == .recommend && refreshing ? "正在刷新" : selected == t ? "已选择" : "")
+                .accessibilityHint(t == .recommend && selected == .recommend ? "再次点击刷新推荐" : "切换频道")
+            }
+        }
+        .animation(.snappy(duration: 0.25), value: selected)
+        .fixedSize()
+        .themeShadow(.mediaLabel)
     }
 }
 
@@ -3811,28 +3839,10 @@ struct DYClassicFeedScreen: DYRecommendFeedHost {
         .accessibilityHidden(showSearch && searchIsSplit)
     }
 
-    /// 保留原版频道切换；两侧操作及安全区由系统导航栏管理。
+    /// 保留原版频道切换；两侧操作及安全区由系统导航栏管理。页签样式与默认模式同一份（DYChannelTabs）。
     private var topBar: some View {
-        HStack(spacing: 14) {
-            ForEach(DYClassicChannelDrag.order, id: \.self) { channel in
-                Button { tapChannel(channel) } label: {
-                    VStack(spacing: 3) {
-                        Text(channel.title).font(.headline.weight(tab == channel ? .bold : .medium))
-                            .foregroundStyle(.white.opacity(tab == channel ? 1 : 0.62))
-                        Capsule().fill(.white).frame(width: 16, height: 3)
-                            .opacity(tab == channel ? 1 : 0)
-                    }
-                    .frame(minHeight: 44).contentShape(Rectangle())
-                    .accessibilityIdentifier("douyin.channel.\(channel == .follow ? "follow" : channel == .recommend ? "recommend" : "live")")
-                }
-                .buttonStyle(.plain)
-                .accessibilityValue(channel == .recommend && refreshing ? "正在刷新" : tab == channel ? "已选择" : "")
-                .accessibilityHint(channel == .recommend && tab == .recommend ? "再次点击刷新推荐" : "切换频道")
-            }
-        }
-        .fixedSize(horizontal: true, vertical: false)
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("douduo.feed")) } action: { topChrome = $0 }
-        .themeShadow(.mediaLabel)
+        DYChannelTabs(selected: tab, refreshing: refreshing, spacing: 22) { tapChannel($0) }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("douduo.feed")) } action: { topChrome = $0 }
     }
 
     @ViewBuilder

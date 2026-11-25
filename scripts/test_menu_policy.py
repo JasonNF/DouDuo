@@ -110,18 +110,37 @@ class MenuPolicyTests(unittest.TestCase):
 
     def test_top_bar_icons_and_hit_targets(self):
         top = block(UPSTREAM_ROOT, "private func topBarRow")
-        self.assertIn("ForEach(DYTab.allCases", top)
+        # 官方样式：页签走共用组件，顺序「直播 / 关注 / 推荐」（推荐在最右）；左上「我的」、右上「信息」图标
+        self.assertIn("DYChannelTabs(selected: tab", top)
+        chips = block(FEED, "struct DYChannelTabs")
+        self.assertIn("ForEach(DYTab.barOrder", chips)
+        self.assertIn("matchedGeometryEffect", chips)
+        self.assertIn("static let barOrder: [DYTab] = [.live, .follow, .recommend]", FEED)
+        self.assertIn("DYChannelTabs(selected: tab", block(FEED, "struct DYClassicFeedScreen"))
         tabs = block(FEED, "enum DYTab:")
         for title in ("关注", "推荐", "直播"):
             self.assertIn('"' + title + '"', tabs)
-        # 老板 2026-11-19：顶栏「信息」要有字，点它进信息页
-        self.assertIn('Text("信息")', top)
+        self.assertIn('accessibilityLabel("信息")', top)
         self.assertIn("showMessages = true", top)
+        self.assertIn("showMine = true", top)
+        self.assertLess(top.index("showMine = true"), top.index("DYChannelTabs"))
+        self.assertLess(top.index("DYChannelTabs"), top.index("showMessages = true"))
         self.assertNotIn("myUser?.name", top)
         self.assertNotIn("showName", top)
         self.assertIn("noticeUnread > 0", top)
         self.assertIn("theme.status.danger", top)
         self.assertEqual(top.count(".frame(minWidth: 44, minHeight: 44)"), 2)
+
+    def test_progress_bar_official_rules(self):
+        player = (ROOT / "DouDuo" / "ShortVideoPlayer.swift").read_text()
+        # 30 秒以内不显示（拖动时除外），离线库一律显示；播放细、暂停粗、拖动最粗
+        self.assertIn("static let progressMinDuration: Double = 30", player)
+        shows = block(player, "private var showsProgressBar")
+        for token in ("seeking", "inLibrary == true", "duration >= Self.progressMinDuration"):
+            self.assertIn(token, shows)
+        self.assertIn("!progressOnRail && showsProgressBar", player)
+        bar = block(player, "private func progressBar")
+        self.assertIn("let height: CGFloat = seeking ? 6 : (paused ? 4 : 2)", bar)
 
     def test_current_item_menu(self):
         menu = block(UPSTREAM_PAGE, "private func moreMenu")
