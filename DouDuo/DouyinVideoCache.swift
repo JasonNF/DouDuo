@@ -153,7 +153,8 @@ actor DYVideoCache {
         // 整条下几条看流量策略（DYNetPolicy）：用流量且省流量开 → 0（开头几秒由预热播放器经 ddstream 取，
         // 看完的条由边下边播自然拼成完整文件再收进来）；Wi-Fi 省流量关 → 按预缓存数量整条下
         let whole = DYNetPolicy.current.whole
-        if DYStream.enabled, DYNetPath.shared.cellular, whole == 0 {
+        // 发热 / 低电量降载时同样处理：正在整条下的那条也立刻停，不等划到下一条
+        if DYStream.enabled, DYNetPath.shared.cellular || DYNetPolicy.constrained, whole == 0 {
             job?.cancel(); job = nil; jobID = nil
             prepare()
             return

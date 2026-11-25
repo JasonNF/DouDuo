@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 import Network
 
@@ -79,10 +80,33 @@ enum DYNetPolicy {
         return Plan(lowQuality: false, preload: n, whole: wifiSaver ? 0 : n)
     }
 
-    static var current: Plan {
-        plan(cellular: DYNetPath.shared.cellular, wifiSaver: DYStream.wifiSaverOn, cellSaver: DYStream.saverOn,
-             streaming: DYStream.enabled, limit: DYVideoCache.limit)
+    /// 发热（serious 及以上）或低电量模式：不整条预下、预热最多 2 条。整条下载让网络和磁盘一直忙，是 Wi-Fi 下发热的大头；
+    /// 开头几秒仍由预热播放器经 ddstream 取，划到照样秒开。关了边下边播时播放要靠整条下，不降。
+    nonisolated static func throttled(_ p: Plan, constrained: Bool, streaming: Bool) -> Plan {
+        guard constrained, streaming else { return p }
+        return Plan(lowQuality: p.lowQuality, preload: min(p.preload, 2), whole: 0)
     }
+
+    static var current: Plan {
+        throttled(plan(cellular: DYNetPath.shared.cellular, wifiSaver: DYStream.wifiSaverOn, cellSaver: DYStream.saverOn,
+                       streaming: DYStream.enabled, limit: DYVideoCache.limit),
+                  constrained: constrained, streaming: DYStream.enabled)
+    }
+
+    static var constrained: Bool {
+        let info = ProcessInfo.processInfo
+        return info.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue || info.isLowPowerModeEnabled
+    }
+}
+
+/// 发热档位或低电量模式变化。系统在任意线程发这两个通知，这里统一切回主线程。
+enum DYPowerWatch {
+    static let changes: AnyPublisher<Void, Never> = NotificationCenter.default
+        .publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+        .merge(with: NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange))
+        .map { _ in () }
+        .receive(on: DispatchQueue.main)
+        .eraseToAnyPublisher()
 }
 
 /// 当前网络是不是蜂窝（流量）

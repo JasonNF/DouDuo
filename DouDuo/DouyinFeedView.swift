@@ -2080,6 +2080,8 @@ struct DYUpstreamFeedScreen: DYRecommendFeedHost {
         // 开 App 时推荐没拉到（签名还没好 / 网络抖一下）：签名一就绪立刻补拉，之后每 2 秒检查一次（补拉本身 3 秒节流）
         .onReceive(bridge.$signReady) { ok in if ok { refillIfStuck(reason: "sign") } }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in refillIfStuck(reason: "timer") }
+        // 发热档位 / 低电量模式变了：重排预热和整条预下（DYNetPolicy.throttled），不等划到下一条
+        .onReceive(DYPowerWatch.changes) { _ in focusCurrent() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             saveSession()
         }
@@ -3431,6 +3433,8 @@ struct DYClassicFeedScreen: DYRecommendFeedHost {
         // 开 App 时推荐没拉到（签名还没好 / 网络抖一下）：签名一就绪立刻补拉，之后每 2 秒检查一次（补拉本身 3 秒节流）
         .onReceive(bridge.$signReady) { ok in if ok { refillIfStuck(reason: "sign") } }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in refillIfStuck(reason: "timer") }
+        // 发热档位 / 低电量模式变了：重排预热和整条预下（DYNetPolicy.throttled），不等划到下一条
+        .onReceive(DYPowerWatch.changes) { _ in focusCurrent() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             saveSession()
         }

@@ -83,6 +83,12 @@ precondition(plan(true, true, false, 1) == P(lowQuality: false, preload: 2, whol
 precondition(plan(false, false, true, 50).preload == 10 && plan(false, false, true, 0).preload == 1)
 // 关了边下边播：按条数整条下
 precondition(plan(true, false, true, 5, streaming: false) == P(lowQuality: false, preload: 5, whole: 5))
+// 发热 / 低电量：不整条下、预热最多 2 条；关了边下边播时不降（播放要靠整条下）；不受限时原样
+let wifi10 = plan(false, false, true, 10)
+precondition(DYNetPolicy.throttled(wifi10, constrained: true, streaming: true) == P(lowQuality: false, preload: 2, whole: 0))
+precondition(DYNetPolicy.throttled(plan(true, false, true, 10), constrained: true, streaming: true) == P(lowQuality: true, preload: 1, whole: 0))
+precondition(DYNetPolicy.throttled(wifi10, constrained: true, streaming: false) == wifi10)
+precondition(DYNetPolicy.throttled(wifi10, constrained: false, streaming: true) == wifi10)
 print("PASS net policy: wifi/cellular saver x network")
 '''
         with tempfile.TemporaryDirectory() as d:
@@ -94,6 +100,23 @@ print("PASS net policy: wifi/cellular saver x network")
         self.assertIn("let whole = DYNetPolicy.current.whole", cache)
         self.assertIn("let follow = Array(rest.prefix(whole))", cache)
         self.assertIn("DYNetPolicy.current.preload", (ROOT / "DouDuo/DouyinFeedView.swift").read_text())
+
+    def test_power_throttle(self):
+        """发热 / 低电量降载：整条预下停、弹幕固定 60 帧、环境光随状态变化当场停"""
+        stream = (ROOT / "DouDuo/DYStreamCache.swift").read_text()
+        current = stream[stream.index("    static var current: Plan {"):stream.index("/// 当前网络是不是蜂窝")]
+        self.assertIn("throttled(plan(", current)
+        self.assertIn("isLowPowerModeEnabled", current)
+        self.assertIn("thermalStateDidChangeNotification", stream)
+        self.assertIn("NSProcessInfoPowerStateDidChange", stream)
+        self.assertIn("DYNetPath.shared.cellular || DYNetPolicy.constrained, whole == 0", CACHE)
+        self.assertEqual((ROOT / "DouDuo/DouyinFeedView.swift").read_text().count(".onReceive(DYPowerWatch.changes) { _ in focusCurrent() }"), 2)
+        engine = (ROOT / "DouDuo/DYDanmakuEngine.swift").read_text()
+        self.assertIn("CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)", engine)
+        self.assertNotIn("preferred: 120", engine)
+        ambient = (ROOT / "DouDuo/DYVideoAmbient.swift").read_text()
+        self.assertIn("let hot = DYNetPolicy.constrained", ambient)
+        self.assertIn("thermalStateDidChangeNotification", ambient)
 
     def test_telemetry_is_release(self):
         tel = (ROOT / "DouDuo/DYPlaybackTelemetry.swift").read_text()

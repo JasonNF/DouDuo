@@ -134,10 +134,9 @@ final class DYDanmakuEngineView: UIView {
     private func start() {
         guard link == nil, window != nil, !DDPerfExperiment.off("DANMAKU") else { return }
         let l = CADisplayLink(target: DYDanmakuEngineTick(self), selector: #selector(DYDanmakuEngineTick.tick(_:)))
-        // 发热（serious 及以上）时降到 60 帧：弹幕平移 60 帧肉眼也是顺的
-        let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
-        l.preferredFrameRateRange = hot ? CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
-                                        : CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        // 一律 60 帧：弹幕平移 60 帧肉眼就是顺的；要 120 帧会把 ProMotion 屏锁在 120Hz、主线程每秒多跑一倍，
+        // 而视频本身多是 30 帧。弹幕默认开，这一项直接决定刷视频时的发热和耗电。
+        l.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         l.add(to: .main, forMode: .common)
         link = l
         lastTS = 0

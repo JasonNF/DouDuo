@@ -48,6 +48,7 @@ final class DYAmbientFrameView: UIView {
     private static let queue = DispatchQueue(label: "douduo.ambient", qos: .utility)
     /// 上一帧还没处理完就不取新帧（不堆积）
     private var working = false
+    private var powerObservers: [NSObjectProtocol] = []
 
     init(player: AVPlayer) {
         self.player = player
@@ -63,9 +64,18 @@ final class DYAmbientFrameView: UIView {
         dimView.backgroundColor = UIColor.black.withAlphaComponent(dim)
         addSubview(imageView)
         addSubview(dimView)
+        // 看同一条长视频时手机慢慢变烫 / 开了低电量模式：当场停掉取帧，不等换下一条
+        powerObservers = [ProcessInfo.thermalStateDidChangeNotification, .NSProcessInfoPowerStateDidChange].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateLink() }
+            }
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
-    deinit { link?.invalidate(); attachedItem?.remove(output) }
+    deinit {
+        link?.invalidate(); attachedItem?.remove(output)
+        powerObservers.forEach(NotificationCenter.default.removeObserver)
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -90,8 +100,8 @@ final class DYAmbientFrameView: UIView {
     }
 
     private func updateLink() {
-        // 发热（serious 及以上）时停掉环境光取帧：背景留在最后一帧，不再每秒做图像处理（抖音同款发热降载）
-        let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+        // 发热（serious 及以上）或低电量模式时停掉环境光取帧：背景留在最后一帧，不再每秒做图像处理（抖音同款发热降载）
+        let hot = DYNetPolicy.constrained
         if active && window != nil && !hot && !DDPerfExperiment.off("AMBIENT") {
             guard link == nil else { return }
             let l = CADisplayLink(target: DYAmbientTick(self), selector: #selector(DYAmbientTick.tick))
