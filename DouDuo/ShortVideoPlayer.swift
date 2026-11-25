@@ -1134,11 +1134,9 @@ struct PlayerPage: View {
         .dyPlaybackHintStyle()
     }
 
-    /// 官方抖音同款：30 秒以内的短视频不显示进度条，只在左右滑快进时出现；离线库里的视频一律显示
-    static let progressMinDuration: Double = 30
-
+    /// 播放时不显示进度条，画面干净；暂停或左右滑快进时才出现。离线库里的视频一律显示，方便拖进度。
     private var showsProgressBar: Bool {
-        seeking || offlineContext?.inLibrary == true || duration >= Self.progressMinDuration
+        seeking || userPaused || offlineContext?.inLibrary == true
     }
 
     private func progressBar(_ cur: Double) -> some View {

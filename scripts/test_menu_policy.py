@@ -144,11 +144,12 @@ class MenuPolicyTests(unittest.TestCase):
 
     def test_progress_bar_official_rules(self):
         player = (ROOT / "DouDuo" / "ShortVideoPlayer.swift").read_text()
-        # 30 秒以内不显示（拖动时除外），离线库一律显示；播放细、暂停粗、拖动最粗
-        self.assertIn("static let progressMinDuration: Double = 30", player)
+        # 播放时不显示；暂停、拖动时出现，离线库一律显示；暂停粗、拖动最粗
+        self.assertNotIn("progressMinDuration", player)
         shows = block(player, "private var showsProgressBar")
-        for token in ("seeking", "inLibrary == true", "duration >= Self.progressMinDuration"):
+        for token in ("seeking", "userPaused", "inLibrary == true"):
             self.assertIn(token, shows)
+        self.assertNotIn("duration", shows)
         self.assertIn("!progressOnRail && showsProgressBar", player)
         bar = block(player, "private func progressBar")
         self.assertIn("let height: CGFloat = seeking ? 6 : (paused ? 4 : 2)", bar)
