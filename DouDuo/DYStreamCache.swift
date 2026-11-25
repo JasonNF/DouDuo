@@ -436,14 +436,19 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
     static let shared = DYStreamLoader()
     static let queue = DispatchQueue(label: "douduo.stream.loader")
 
-    private let session: URLSession = {
+    /// 正在看的那条单独一个连接池：预热 / 整条预下最多同时十来条，跟它共用 6 条连接时，
+    /// 当前条的请求要排在预下载后面，划到后或缓冲见底时干等
+    private let currentSession = DYStreamLoader.makeSession()
+    private let prefetchSession = DYStreamLoader.makeSession()
+
+    private static func makeSession() -> URLSession {
         let c = URLSessionConfiguration.default
         c.httpMaximumConnectionsPerHost = 6
         c.timeoutIntervalForRequest = 20
         c.urlCache = nil
         c.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: c)
-    }()
+    }
 
     private let lock = NSLock()
     private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
@@ -520,6 +525,11 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
         guard let e = DYStreamStore.shared.entry(key) else { return false }
         do { try await ensureInfo(e) } catch { return false }
         while !Task.isCancelled {
+            // 正在看的那条在等数据（起播 / 缓冲见底）：每块之前都先让路。以前只在整条开始前看一次，
+            // 一条开始下就一路 1MB 一块下完，卡顿期间照样跟当前条抢带宽。最多等 8 秒，信号卡住也不会永远停。
+            for _ in 0..<40 where DYVideoCache.isPlaybackWaiting && !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
             e.lock.lock()
             guard let total = e.total else { e.lock.unlock(); return false }
             if e.complete { e.lock.unlock(); return true }
@@ -705,6 +715,7 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
     /// 拉一段网络数据：写进稀疏文件，同时按块喂给播放器（sink）
     private func download(_ e: DYStreamEntry, _ range: Range<Int64>, sink: ((Data) -> Void)?) async throws {
         var lastError: Error = URLError(.badServerResponse)
+        let current = DYStreamStore.shared.isCurrent(e.id)
         e.lock.lock()
         // 锁定了来源就只用它（+ 它的跳转结果）；还没锁定按候选顺序试
         var candidates = e.source.map { [e.resolved, $0].compactMap { $0 } } ?? e.sources
@@ -712,19 +723,29 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
         if e.source != nil { candidates += e.sources.filter { !candidates.contains($0) } }
         let knownTotal = e.total
         e.lock.unlock()
-        for target in candidates {
+        // 只有一个地址时同一地址再试一次（新连接常会落到别的 CDN 节点）。
+        // 最后一次尝试不设断流看门狗：所有地址都慢时最坏情况跟以前一样，等到请求超时，不会因误判把播放器请求判失败。
+        let attempts = candidates.count == 1 ? candidates + candidates : candidates
+        // 换地址后从已经拿到的位置续传：之前的字节已写进文件、喂给了播放器，从头重拉会把重复数据当成后续数据喂进去
+        var resumeAt = range.lowerBound
+        for (n, target) in attempts.enumerated() {
             try Task.checkCancellation()
+            if resumeAt >= range.upperBound { break }
             var r = URLRequest(url: target)
             DYMedia.headers.forEach { r.setValue($1, forHTTPHeaderField: $0) }
-            r.setValue("bytes=\(range.lowerBound)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
+            r.setValue("bytes=\(resumeAt)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
+            let stall = n < attempts.count - 1
+                ? (current ? DYStreamPlan.stallSecondsCurrent : DYStreamPlan.stallSecondsPrefetch) : nil
             do {
                 // 按块收（URLSession 每次给几十 KB），不再逐字节 `for try await b in bytes`：
                 // 逐字节一条 10MB 视频就是一千万次异步迭代，真机分析里是后台 CPU 第一大户（发烫原因之一）
-                let chunks = DYChunkStream(session: session, request: r)
+                let chunks = DYChunkStream(session: current ? currentSession : prefetchSession, request: r,
+                                           priority: current ? URLSessionTask.highPriority : URLSessionTask.lowPriority,
+                                           stallAfter: stall, stallTimedFromStart: current)
                 let resp = try await chunks.response()
                 defer { chunks.cancel() }
                 #if DEBUG
-                DYLiveModel.log("DDSTREAMNET \(e.id.suffix(6)) \((resp as? HTTPURLResponse)?.statusCode ?? -1) range=\(range.lowerBound)-\(range.upperBound)")
+                DYLiveModel.log("DDSTREAMNET \(e.id.suffix(6)) \((resp as? HTTPURLResponse)?.statusCode ?? -1) range=\(resumeAt)-\(range.upperBound) cur=\(current) try=\(n)")
                 #endif
                 guard let http = resp as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200 else {
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
@@ -747,8 +768,9 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
                 if let final = http.url, final != target { e.resolved = final }
                 e.lock.unlock()
                 // 200 = 服务器不认 Range，回来的是整条：从 0 写，不直接喂（serve 循环会从本地读）
-                var offset = http.statusCode == 206 ? range.lowerBound : 0
-                let feed = http.statusCode == 206 ? sink : nil
+                let partial = http.statusCode == 206
+                var offset = partial ? resumeAt : 0
+                let feed = partial ? sink : nil
                 var buf = Data(); buf.reserveCapacity(64 * 1024)
                 func flush() throws {
                     try Task.checkCancellation()
@@ -756,6 +778,7 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
                     feed?(buf)
                     DYStreamStore.shared.noteFetched(Int64(buf.count))
                     offset += Int64(buf.count)
+                    if partial { resumeAt = offset }
                     buf.removeAll(keepingCapacity: true)
                 }
                 for try await chunk in chunks.data {
@@ -770,16 +793,25 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
                 e.lock.lock(); e.saveMeta(); e.lock.unlock()
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
                 if target == e.resolved { e.lock.lock(); e.resolved = nil; e.lock.unlock() }
+                #if DEBUG
+                if (error as? URLError)?.code == .timedOut, stall != nil {
+                    DYLiveModel.log("DDSTREAMSTALL \(e.id.suffix(6)) cur=\(current) try=\(n) at=\(resumeAt) 断流换地址")
+                }
+                #endif
                 lastError = error
             }
         }
+        // 上一次尝试已经把这段收齐、只是收尾时断了
+        if resumeAt >= range.upperBound { DYStreamStore.shared.finishIfComplete(e); return }
         throw lastError
     }
 }
 
 
-/// 用 dataTask + delegate 按块收数据（替代逐字节的 URLSession.AsyncBytes）
+/// 用 dataTask + delegate 按块收数据（替代逐字节的 URLSession.AsyncBytes）。
+/// 带断流看门狗：stallAfter 秒内一个字节都没来就取消，按 URLError(.timedOut) 失败，交给调用方换地址。
 final class DYChunkStream: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private static let watchQueue = DispatchQueue(label: "douduo.stream.stall", qos: .utility)
     let data: AsyncThrowingStream<Data, Error>
     private let cont: AsyncThrowingStream<Data, Error>.Continuation
     private var task: URLSessionDataTask?
@@ -787,16 +819,44 @@ final class DYChunkStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
     private var respCont: CheckedContinuation<URLResponse, Error>?
     private var gotResponse: URLResponse?
     private var failed: Error?
+    /// 最后一次有动静（发出 / 响应头 / 数据）的时刻；nil = 看门狗还没开始计时
+    private var lastActivity: TimeInterval?
+    private var stalled = false
+    private var watchdog: DispatchSourceTimer?
 
-    init(session: URLSession, request: URLRequest) {
+    init(session: URLSession, request: URLRequest, priority: Float = URLSessionTask.defaultPriority,
+         stallAfter: TimeInterval? = nil, stallTimedFromStart: Bool = false) {
         var c: AsyncThrowingStream<Data, Error>.Continuation!
         data = AsyncThrowingStream(bufferingPolicy: .unbounded) { c = $0 }
         cont = c
         super.init()
         let t = session.dataTask(with: request)
+        t.priority = priority
         t.delegate = self
         task = t
+        if let stallAfter {
+            if stallTimedFromStart { lastActivity = ProcessInfo.processInfo.systemUptime }
+            let timer = DispatchSource.makeTimerSource(queue: Self.watchQueue)
+            timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+            timer.setEventHandler { [weak self] in self?.checkStall(stallAfter) }
+            watchdog = timer
+            timer.resume()
+        }
         t.resume()
+    }
+
+    deinit { watchdog?.cancel() }
+
+    private func touch() {
+        lock.lock(); lastActivity = ProcessInfo.processInfo.systemUptime; lock.unlock()
+    }
+
+    private func checkStall(_ limit: TimeInterval) {
+        lock.lock()
+        let hit = !stalled && lastActivity.map { ProcessInfo.processInfo.systemUptime - $0 > limit } == true
+        if hit { stalled = true }
+        lock.unlock()
+        if hit { task?.cancel() }
     }
 
     func response() async throws -> URLResponse {
@@ -811,22 +871,27 @@ final class DYChunkStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
         } onCancel: { self.cancel() }
     }
 
-    func cancel() { task?.cancel() }
+    func cancel() { watchdog?.cancel(); task?.cancel() }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        lock.lock(); gotResponse = response; let k = respCont; respCont = nil; lock.unlock()
+        lock.lock(); gotResponse = response; lastActivity = ProcessInfo.processInfo.systemUptime
+        let k = respCont; respCont = nil; lock.unlock()
         k?.resume(returning: response)
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        touch()
         cont.yield(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        watchdog?.cancel()
         lock.lock()
         let k = respCont; respCont = nil
+        // 看门狗取消的不是「不要了」，按超时失败，调用方才会换地址而不是当成播放器取消
+        let error: Error? = stalled ? URLError(.timedOut) : error
         if let error { failed = error }
         lock.unlock()
         if let error {

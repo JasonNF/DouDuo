@@ -15,6 +15,10 @@ enum DYStreamPlan {
     static let jumpWindowSeconds: Double = 8
     /// 不知道文件多大时，第一次只取这么多（够读到 ftyp + moov 头）
     static let probeBytes: Int64 = 512 * 1024
+    /// 断流判定：连接这么久一个字节都没来就换地址重拉（原来只有 20 秒请求超时，CDN 连接半死时画面干等）。
+    /// 当前条从发出请求就开始计时；预加载的条可能在连接池里排队，收到响应头后才开始计时。
+    static let stallSecondsCurrent: Double = 4
+    static let stallSecondsPrefetch: Double = 8
     /// 单次网络请求最多取多少；太大取消不及时，太小握手多
     static let chunkBytes: Int64 = 1 * 1024 * 1024
     /// 请求起点比允许范围还远这么多，才算「跳着读」（拖进度条 / 读尾部 moov）

@@ -2,30 +2,42 @@ import AVFoundation
 import Foundation
 import Synchronization
 
-/// 浏览会话保存在 Application Support，不随视频缓存清理或系统回收而丢失。
-struct DYFeedSession: Codable {
+/// 推荐列表快照文件。启动早已不再恢复会话（4422ad1：旧播放地址签名过期会 403），只剩调试用途：
+/// scripts/capture_duo_regression.py 从模拟器里读它核对推荐列表。
+/// 旧版每次翻页、每 5 秒在主线程把整个列表（只增不减）编码落盘，越刷越慢；现在正式版不写、启动删旧文件，
+/// 调试版放到后台串行队列写。
+enum DYFeedSessionFile {
+    static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("feed-session.json")
+    }
+}
+
+#if DEBUG
+struct DYFeedSession: Codable, Sendable {
     var items: [DYAweme]
     var currentID: String
     var positions: [String: Double]
 
-    static var url: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("feed-session.json")
-    }
+    private static let queue = DispatchQueue(label: "douduo.feed-session", qos: .utility)
+
     static func load() -> DYFeedSession? {
-        guard let data = try? Data(contentsOf: url),
+        guard let data = try? Data(contentsOf: DYFeedSessionFile.url),
               let session = try? JSONDecoder().decode(Self.self, from: data),
               session.items.contains(where: { $0.id == session.currentID }) else { return nil }
         return session
     }
     func save() {
-        guard items.contains(where: { $0.id == currentID }),
-              let data = try? JSONEncoder().encode(self) else { return }
-        do { try data.write(to: Self.url, options: .atomic) }
-        catch { DYLiveModel.log("DDSESSION 保存失败 \(error.localizedDescription)") }
+        guard items.contains(where: { $0.id == currentID }) else { return }
+        Self.queue.async {
+            guard let data = try? JSONEncoder().encode(self) else { return }
+            try? FileManager.default.createDirectory(at: DYFeedSessionFile.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            do { try data.write(to: DYFeedSessionFile.url, options: .atomic) }
+            catch { DYLiveModel.log("DDSESSION 保存失败 \(error.localizedDescription)") }
+        }
     }
 }
+#endif
 
 actor DYVideoCache {
     static let shared = DYVideoCache()
@@ -120,8 +132,13 @@ actor DYVideoCache {
 
     func setPlaybackWaiting(_ v: Bool) { playbackWaiting = v }
 
+    /// 同一个信号的同步版：边下边播的整条预下在每块之间查它（那边不在这个 actor 里，不能 await 一圈）
+    private static let playbackWaitingNow = Mutex(false)
+    nonisolated static var isPlaybackWaiting: Bool { playbackWaitingNow.withLock { $0 } }
+
     /// 播放器直接调用（不 await）：起播/卡顿时让缓存下载让路
     nonisolated func reportPlaybackWaiting(_ v: Bool) {
+        Self.playbackWaitingNow.withLock { $0 = v }
         Task { await setPlaybackWaiting(v) }
     }
 
