@@ -120,6 +120,47 @@ class StreamPlan(unittest.TestCase):
             if "e.lock.unlock()" in line:
                 held = False
 
+    def test_playing_cache_survives(self):
+        """11-26 真机：播放中卡住几秒→黑屏→又播。正在播的这条的缓存被「已看过」淘汰删掉、ddstream 条目被 trim 收掉后，
+        播放器缓冲播完拿不到数据，看门狗拆了重建再从网络拉"""
+        evict = CACHE[CACHE.index("private func evict()"):CACHE.index("func purgeWatched()")]
+        self.assertIn("focusedItems.map(\\.id)", evict)
+        self.assertIn("DYStreamStore.shared.currentVideoID", evict)
+        self.assertIn("Self.evictions(", evict)
+        # 把正式的淘汰函数编出来真跑：真机场景——正在播的这条最早加入、刚被标已看，收进第 6 条缓存时不能删它
+        a = CACHE.index("    nonisolated static func evictions(")
+        b = CACHE.index("\n    }\n", a) + len("\n    }\n")
+        harness = "import Foundation\nenum C {\n" + CACHE[a:b] + "}\n" + r'''
+func check(_ c: Bool, _ m: String) { if !c { print("FAIL", m); exit(1) } }
+let list: [(id: String, watched: Bool, bytes: Int)] = [("playing", true, 50), ("b", false, 10), ("c", false, 10), ("d", false, 10), ("e", false, 10), ("new", false, 10)]
+check(C.evictions(list, protected: [], limit: 5, watchedKeep: 3, maxBytes: 1000) == ["playing"], "旧行为：不保护就删正在播的")
+check(C.evictions(list, protected: ["playing"], limit: 5, watchedKeep: 3, maxBytes: 1000) == ["b"], "保护正在播的，改删最早未保护的")
+// 已看过超 3 条：最早的已看先删，跳过受保护的
+let w: [(id: String, watched: Bool, bytes: Int)] = [("p", true, 1), ("w1", true, 1), ("w2", true, 1), ("w3", true, 1), ("w4", true, 1)]
+check(C.evictions(w, protected: ["p"], limit: 10, watchedKeep: 3, maxBytes: 1000) == ["w1", "w2"], "已看超额跳过受保护")
+// 全都受保护：宁可暂时超上限，不死循环
+check(C.evictions(list, protected: Set(list.map(\.id)), limit: 2, watchedKeep: 0, maxBytes: 1).isEmpty, "全保护不删")
+// 体积超上限也按同样顺序删
+check(C.evictions([("p", true, 900), ("x", false, 200)], protected: ["p"], limit: 10, watchedKeep: 3, maxBytes: 1000) == ["x"], "超体积跳过受保护")
+print("PASS evictions protect playing")
+'''
+        with tempfile.TemporaryDirectory() as d:
+            f = pathlib.Path(d) / "EV.swift"; f.write_text(harness)
+            r = subprocess.run(["swift", str(f)], text=True, capture_output=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        print(r.stdout.strip())
+        # 条目被收掉也能接着给数据：按原视频重建，正式缓存在就记下整条大小直接读本地
+        self.assertIn("DYStreamStore.shared.entry(streamKey) ?? DYStreamStore.shared.revive(streamKey)", STREAM)
+        revive = STREAM[STREAM.index("func revive("):STREAM.index("var currentVideoID")]
+        self.assertIn("DYVideoCache.localURL(id)", revive)
+        self.assertIn("e.total = Int64(whole)", revive)
+        # 真实体积超上限不整条预下
+        self.assertIn("if Double(size) > DYVideoCache.sizeCap", STREAM)
+        # 重建优先本地整条；缓冲还够时就地续播不重建
+        rebuild = PLAYER[PLAYER.index("private func rebuild()"):PLAYER.index("private func kickIfOverCautious")]
+        self.assertIn("localWhole ?? altURL ?? url", rebuild)
+        self.assertIn("DYPlaybackTelemetry.bufferedAhead(p) >= 2", PLAYER[PLAYER.index("private func watchdog("):PLAYER.index("private func retryPlayback()")])
+
 
 if __name__ == "__main__":
     unittest.main()

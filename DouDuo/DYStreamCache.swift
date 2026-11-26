@@ -269,6 +269,30 @@ final class DYStreamStore: @unchecked Sendable {
         let e = entries[key]; e?.lastUsed = Date(); return e
     }
 
+    /// 播放器手里还拿着这条的 ddstream 资源，条目却已被 trim 收掉（整条收进正式缓存后 .part 和条目一起删）：
+    /// 按原视频重建条目。以前直接拒绝请求，播放器把内存里的缓冲播完就再也拿不到数据——卡住几秒再黑屏重建。
+    /// 正式缓存还在就记下整条大小，serve 直接从整条文件给，不联网
+    func revive(_ key: String) -> DYStreamEntry? {
+        let id = String(key.split(separator: "~").first ?? Substring(key))
+        let whole = DYVideoCache.localURL(id).flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
+        lock.lock()
+        if let e = entries[key] { lock.unlock(); return e }
+        guard let item = items[id] else { lock.unlock(); return nil }
+        let saver = key.hasSuffix("~s") ? item.playSaver.flatMap(URL.init(string:)) : nil
+        var seen = Set<URL>()
+        let sources = [saver, item.play.flatMap(URL.init(string:)), item.playAlt.flatMap(URL.init(string:))]
+            .compactMap { $0 }.filter { seen.insert($0).inserted }
+        let e = DYStreamEntry(key: key, item: item, sources: sources)
+        e.loadMeta()
+        if e.total == nil, let whole, whole > 0 { e.total = Int64(whole) }
+        entries[key] = e
+        lock.unlock()
+        DYLiveModel.log("DDSTREAM revive \(id.suffix(6)) whole=\(whole.map { "\($0 / 1024)KB" } ?? "-")")
+        return e
+    }
+
+    var currentVideoID: String? { lock.lock(); defer { lock.unlock() }; return currentID }
+
     /// 播放器每 0.25s 报一次（只报当前条）
     func setPlayhead(_ id: String, _ seconds: Double) {
         lock.lock()
@@ -548,6 +572,13 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
         let key = DYStreamStore.shared.register(item, remote: remote)
         guard let e = DYStreamStore.shared.entry(key) else { return false }
         do { try await ensureInfo(e) } catch { return false }
+        // 时长估算的体积常常偏小（真机：估 285MB 的实际 725MB、882MB），拿到真实大小超上限就不整条下，
+        // 免得一条大片下几十秒、跟正在播的长视频抢带宽
+        e.lock.lock(); let size = e.total ?? 0; e.lock.unlock()
+        if Double(size) > DYVideoCache.sizeCap {
+            DYLiveModel.log("DDSTREAM skip-whole \(item.id.suffix(6)) \(size / 1024 / 1024)MB > \(Int(DYVideoCache.sizeCap) / 1024 / 1024)MB")
+            return false
+        }
         while !Task.isCancelled {
             // 正在看的那条在等数据（起播 / 缓冲见底）：每块之前都先让路。以前只在整条开始前看一次，
             // 一条开始下就一路 1MB 一块下完，卡顿期间照样跟当前条抢带宽。最多等 8 秒，信号卡住也不会永远停。
@@ -601,7 +632,8 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
     }
 
     func resourceLoader(_ loader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource req: AVAssetResourceLoadingRequest) -> Bool {
-        guard let url = req.request.url, let streamKey = DYStream.id(of: url), let e = DYStreamStore.shared.entry(streamKey) else { return false }
+        guard let url = req.request.url, let streamKey = DYStream.id(of: url),
+              let e = DYStreamStore.shared.entry(streamKey) ?? DYStreamStore.shared.revive(streamKey) else { return false }
         let key = ObjectIdentifier(req)
         let t = Task { [weak self] in
             await self?.serve(req, entry: e)

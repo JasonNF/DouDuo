@@ -556,19 +556,31 @@ actor DYVideoCache {
 
     /// 超上限：先删看过的（最早的先删），还超就删最早加进来的
     private func evict() {
-        // 「已看过」最多留 watchedKeep 条，其余先删：看过的缓存没意义，重启也不该再刷到
-        var watched = entries.filter(\.watched).count
-        while watched > Self.watchedKeep, let idx = entries.firstIndex(where: \.watched) {
-            let e = entries.remove(at: idx)
-            try? FileManager.default.removeItem(at: Self.fileURL(e.aweme.id))
-            watched -= 1
+        // 正在播的、接下来要播的不删。划到就标「已看」，以前收进别的缓存时会按「已看、最早加入」先把正在播的这条删掉，
+        // 播放器读到缓冲尽头没数据可读 → 卡住几秒、黑屏重建（11-26 真机日志 6 次，都是划到后 1–6 秒内删的）
+        let protected = Set(focusedItems.map(\.id) + [DYStreamStore.shared.currentVideoID].compactMap { $0 })
+        let drop = Set(Self.evictions(entries.map { ($0.aweme.id, $0.watched, $0.bytes) }, protected: protected,
+                                      limit: max(Self.limit, 0), watchedKeep: Self.watchedKeep, maxBytes: Self.maxBytes))
+        for e in entries where drop.contains(e.aweme.id) { try? FileManager.default.removeItem(at: Self.fileURL(e.aweme.id)) }
+        entries.removeAll { drop.contains($0.aweme.id) }
+    }
+
+    /// 淘汰哪些（纯函数，脚本测试直接跑；列表按加入顺序）：「已看过」最多留 watchedKeep 条，最早的先删；
+    /// 还超条数 / 体积就先删看过的、再删最早加入的。protected 一律不删，全都受保护时宁可暂时超上限
+    nonisolated static func evictions(_ list: [(id: String, watched: Bool, bytes: Int)], protected: Set<String>,
+                                      limit: Int, watchedKeep: Int, maxBytes: Int) -> [String] {
+        var rest = list, out: [String] = []
+        func take(_ i: Int) { out.append(rest.remove(at: i).id) }
+        var watched = rest.filter { $0.watched }.count
+        while watched > watchedKeep, let i = rest.firstIndex(where: { $0.watched && !protected.contains($0.id) }) {
+            take(i); watched -= 1
         }
-        let lim = max(Self.limit, 0)
-        while entries.count > lim || entries.reduce(0, { $0 + $1.bytes }) > Self.maxBytes {
-            let idx = entries.firstIndex(where: \.watched) ?? 0
-            let e = entries.remove(at: idx)
-            try? FileManager.default.removeItem(at: Self.fileURL(e.aweme.id))
+        while rest.count > limit || rest.reduce(0, { $0 + $1.bytes }) > maxBytes {
+            guard let i = rest.firstIndex(where: { $0.watched && !protected.contains($0.id) })
+                    ?? rest.firstIndex(where: { !protected.contains($0.id) }) else { break }
+            take(i)
         }
+        return out
     }
 
     /// 启动时回收旧版分段、索引之外的文件和已看过的视频。

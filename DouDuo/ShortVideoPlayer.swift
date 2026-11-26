@@ -1575,13 +1575,16 @@ struct PlayerPage: View {
             let reason = p.reasonForWaitingToPlay.map { $0.rawValue } ?? "-"
             let src = (it?.asset as? AVURLAsset)?.url.scheme ?? "-"
             DYLiveModel.log("DDSTARTDIAG \(id) status=\(st) err=\(err) host=\(url.host ?? "-") alt=\(altURL?.host ?? "-") retried=\(avRetried) src=\(src) tcs=\(p.timeControlStatus.rawValue) rate=\(p.rate) why=\(reason) keepUp=\(it?.isPlaybackLikelyToKeepUp ?? false) full=\(it?.isPlaybackBufferFull ?? false) empty=\(it?.isPlaybackBufferEmpty ?? false) loaded=[\(ranges)] pos=\(String(format: "%.2f", position))")
-            // 数据已经够了却停着（rate=0 / 暂停态）：是播放被打断了不是数据问题，
-            // 重新激活音频会话再播一下就行，不必重建播放器
-            if it?.status == .readyToPlay, p.rate == 0, p.timeControlStatus == .paused, it?.isPlaybackLikelyToKeepUp == true {
+            // 数据已经够了却停着：是播放被打断（rate=0 / 暂停态），或缓冲还有 2 秒以上却在「怕卡」等待
+            // （真机 11-26：缓冲 10 秒、waitingToMinimizeStalls 被判卡死重建，黑屏几秒）。
+            // 重新激活音频会话直接播就行，不必拆掉播放器重建
+            let pausedReady = p.rate == 0 && p.timeControlStatus == .paused && it?.isPlaybackLikelyToKeepUp == true
+            let overCautious = p.timeControlStatus == .waitingToPlayAtSpecifiedRate && DYPlaybackTelemetry.bufferedAhead(p) >= 2
+            if it?.status == .readyToPlay, pausedReady || overCautious {
                 DDAudioSessionGate.forceActive()
                 p.playImmediately(atRate: playRate)
                 seamAudio.setActive(true, isPlaying: true, rate: playRate, muted: muted)
-                DYLiveModel.log("DDSTARTDIAG \(id) resume-in-place")
+                DYLiveModel.log("DDSTARTDIAG \(id) resume-in-place buf=\(String(format: "%.1f", DYPlaybackTelemetry.bufferedAhead(p)))s")
                 watchdog(p)
                 return
             }
@@ -1614,9 +1617,11 @@ struct PlayerPage: View {
         #if DEBUG
         ddWrite("DDREBUILD \(id) alt=\(altURL != nil)")
         #endif
+        // 整条已缓存就从本地文件重建：以前一律走网络重新拉，已经下好的视频也要黑屏等几秒
+        let localWhole = offlineContext?.localOnly == true ? nil : DYVideoCache.localURL(id)
         let source = offlineContext?.localOnly == true
             ? offlineContext?.localURL()
-            : (altURL ?? url)
+            : (localWhole ?? altURL ?? url)
         guard let source else {
             if playbackIsActive { offlineContext?.onFailure() }
             return
@@ -1631,7 +1636,7 @@ struct PlayerPage: View {
             restorePosition(localResume, using: p)
             DYStreamStore.shared.setPlayhead(id, localResume)
         }
-        DYLiveModel.log("DDREBUILD \(id.suffix(6)) resume=\(localResume.map { String(format: "%.1f", $0) } ?? "nil") alt=\(altURL != nil)")
+        DYLiveModel.log("DDREBUILD \(id.suffix(6)) resume=\(localResume.map { String(format: "%.1f", $0) } ?? "nil") alt=\(altURL != nil) local=\(localWhole != nil)")
         isPlaying = true
         bindSeamlessAudio(to: p, initialPos: localResume, active: isActive, playing: true)
         p.rate = playRate
