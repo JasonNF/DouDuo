@@ -1517,11 +1517,14 @@ struct PlayerPage: View {
     private func detachObservers() {
         if let t = timeToken { player?.removeTimeObserver(t); timeToken = nil }
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
+        waitObs?.invalidate(); waitObs = nil
     }
 
     /// 提前挂载的相邻页：暂停的 AVPlayer 不会自己解第一帧，画面层一直是黑的，滑进来才开始解 → 「黑屏一下再播」。
     /// 就绪后 preroll（解码首帧、填满开头缓冲）并把画面停在第一帧，滑过来直接有画面。
     @State private var primeObs: NSKeyValueObservation?
+    /// 播放中进入「怕卡」等待时立刻判断要不要直接接着播（见 kickIfOverCautious）
+    @State private var waitObs: NSKeyValueObservation?
     private func primeFirstFrame(_ p: AVPlayer) {
         guard let it = p.currentItem else { return }
         let start = offlineContext?.inLibrary != true
@@ -1650,17 +1653,20 @@ struct PlayerPage: View {
     /// 真机 DDWAIT：已缓冲 9–29 秒、st=readyToPlay、rate=1，可 AVPlayer 还在 waitingToMinimizeStalls——
     /// 它按边下边播「一段一段到」估出来的下载速度判断会卡，于是一直不肯起播，最后 2.8–3.8 秒才放行。
     /// 缓冲已经够 2 秒以上就别等它的估算：直接 playImmediately（真不够时它会正常进缓冲，不会出错）。
-    private func kickIfOverCautious(_ p: AVPlayer) {
+    /// 播放中同样会犯（11-26 真机：2075 秒长视频每播 6–10 秒停一次，停时缓冲还有 5–13 秒，每次干等 5 秒到看门狗才放行），
+    /// 所以 attachObservers 里一进入这种等待也走这里。
+    /// 用 playbackIsActive 而不是 isActive：从 KVO 回调进来时这份视图副本的 isActive 可能是挂观察时的旧值。
+    private func kickIfOverCautious(_ p: AVPlayer, phase: String = "start") {
         for delay in [0.25, 0.6, 1.2] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard player === p, isActive, isPlaying, !userPaused, vlc == nil,
+                guard player === p, playbackIsActive, isPlaying, !userPaused, !seeking, vlc == nil,
                       p.timeControlStatus == .waitingToPlayAtSpecifiedRate,
                       p.reasonForWaitingToPlay == .toMinimizeStalls,
                       p.currentItem?.status == .readyToPlay else { return }
                 let buf = DYPlaybackTelemetry.bufferedAhead(p)
                 guard buf >= 2 else { return }
                 p.playImmediately(atRate: playRate)
-                DYLiveModel.log("DDKICK \(id.suffix(6)) +\(delay)s buf=\(String(format: "%.1f", buf))s 跳过「怕卡」等待直接起播")
+                DYLiveModel.log("DDKICK \(id.suffix(6)) \(phase) +\(delay)s at=\(String(format: "%.1f", p.currentTime().seconds)) buf=\(String(format: "%.1f", buf))s 跳过「怕卡」等待直接播")
             }
         }
     }
@@ -1865,6 +1871,11 @@ struct PlayerPage: View {
     }
 
     private func attachObservers(_ p: AVPlayer) {
+        waitObs?.invalidate()
+        waitObs = p.observe(\.timeControlStatus, options: [.new]) { pl, _ in
+            guard pl.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+            DispatchQueue.main.async { if firstFrame { kickIfOverCautious(pl, phase: "mid") } }
+        }
         timeToken = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { t in
             MainActor.assumeIsolated {
                 let pos = seamAudio.currentMediaTime ?? t.seconds
@@ -1946,6 +1957,7 @@ struct PlayerPage: View {
         seamAudio.reset()
         if let t = timeToken { player?.removeTimeObserver(t); timeToken = nil }
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
+        waitObs?.invalidate(); waitObs = nil
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -2108,6 +2120,7 @@ struct PlayerPage: View {
         seamAudio.reset()
         if let t = timeToken { player?.removeTimeObserver(t); timeToken = nil }
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
+        waitObs?.invalidate(); waitObs = nil
         if let np = nextPlayer { np.pause(); np.replaceCurrentItem(with: nil); nextPlayer = nil }
         player?.pause()
         // 还没轮到播就被回收的相邻页：播放器还给预热池接着缓冲，下次滑过来直接用

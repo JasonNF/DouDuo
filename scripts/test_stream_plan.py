@@ -161,6 +161,17 @@ print("PASS evictions protect playing")
         self.assertIn("localWhole ?? altURL ?? url", rebuild)
         self.assertIn("DYPlaybackTelemetry.bufferedAhead(p) >= 2", PLAYER[PLAYER.index("private func watchdog("):PLAYER.index("private func retryPlayback()")])
 
+    def test_mid_playback_kick(self):
+        """11-26 真机：长视频播放中缓冲还有 5–13 秒却「怕卡」干等，每次 5 秒到看门狗才放行。
+        播放中一进入等待就走同一套兜底；回调里用 @State 的 playbackIsActive，不用可能过期的 isActive"""
+        attach = PLAYER[PLAYER.index("private func attachObservers("):PLAYER.index("timeToken = p.addPeriodicTimeObserver")]
+        self.assertIn("p.observe(\\.timeControlStatus", attach)
+        self.assertIn('kickIfOverCautious(pl, phase: "mid")', attach)
+        kick = PLAYER[PLAYER.index("private func kickIfOverCautious("):PLAYER.index("private func resumeIfStolen(")]
+        self.assertIn("playbackIsActive, isPlaying, !userPaused, !seeking", kick)
+        self.assertIn("guard buf >= 2", kick)
+        self.assertEqual(PLAYER.count("waitObs?.invalidate(); waitObs = nil"), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
